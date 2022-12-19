@@ -5911,6 +5911,27 @@ _sess_process_packet(struct session_list *slp, netsnmp_session * sp,
   return rc;
 }
 
+#ifdef NHM_EXTENSION
+// add hook to allow this to be called from outside 
+void snmp_sess_receive_packet(void *sessp, u_char *packet, int length, struct sockaddr *from, int from_len)
+{
+  struct session_list *slp = (struct session_list *) sessp;
+  if(slp) {
+    netsnmp_session *sp = slp->session;
+    struct snmp_internal_session *isp = slp->internal;
+    netsnmp_transport *transport = slp->transport;
+    if(transport && transport->sock > 0 && sp && isp && isp->requests) {
+      // for some reason the opaque is expected to be malloc'd by the transport receive fn
+      // because it is then freed by _sess_process_packet() later (not very clean)
+      void *from2 = malloc(from_len);
+      memcpy(from2, from, from_len);
+      int rc = _sess_process_packet(slp, sp, isp, transport, from2, from_len, packet, length);
+      if(rc && sp->s_snmp_errno) SET_SNMP_ERROR(sp->s_snmp_errno);
+    }
+  }
+}
+#endif
+
 /*
  * Checks to see if any of the fd's set in the fdset belong to
  * snmp.  Each socket with it's fd set has a packet read from it

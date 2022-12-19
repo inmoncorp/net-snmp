@@ -1737,6 +1737,9 @@
    i64, ui64, union? */
 #undef NETSNMP_WITH_OPAQUE_SPECIAL_TYPES
 
+/* Define for nhm extensions */
+#undef NHM_EXTENSION
+
 /* Define to the address where bug reports for this package should be sent. */
 #ifndef PACKAGE_BUGREPORT
 #undef PACKAGE_BUGREPORT

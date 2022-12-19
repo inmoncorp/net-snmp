@@ -472,6 +472,234 @@ emergency_print(u_char * field, u_int length)
 }                               /* end emergency_print() */
 #endif                          /* NETSNMP_ENABLE_TESTING_CODE */
 
+#ifdef NHM_EXTENSION
+// take over these four fns:
+// usm_get_user()
+// usm_get_user2()
+// usm_get_user_from_list()
+// usm_add_user()
+// usm_remove_user()
+// but use the same ordering logic as before
+
+#define NHM_USERLIST_SIZ 1024 // must be power of 2
+static struct usmUser *userListArray[NHM_USERLIST_SIZ];
+
+#define FNV_PRIME_32 16777619
+#define FNV_OFFSET_32 2166136261U
+static u_int usm_hash_fnv1a(const u_char *s, const u_int len)
+{
+  u_int hash = FNV_OFFSET_32;
+  u_int i = 0;
+  for(i = 0; i < len; i++) {
+    hash ^= (s[i]);
+    hash *= FNV_PRIME_32;
+  }
+  return hash;
+}
+
+static u_int usm_user_hash(const u_char *engineID, const size_t engineIDLen) {
+  if(engineID == NULL
+     || engineIDLen == 0)
+    return 0;
+  return usm_hash_fnv1a(engineID, (u_int)engineIDLen);
+}
+
+static struct usmUser **usm_user_list(const u_char *engineID, const size_t engineIDLen) {
+  u_int hash = usm_user_hash(engineID, engineIDLen);
+  u_int bkt = hash & (NHM_USERLIST_SIZ-1);
+  return &userListArray[bkt];
+}
+
+static struct usmUser *
+usm_get_user_from_list(const u_char *engineID, size_t engineIDLen,
+                       const char *name, size_t nameLen,
+		       struct usmUser *puserList, int use_default)
+{
+    struct usmUser *ptr;
+    // override puserList parameter
+    puserList = *usm_user_list(engineID, engineIDLen);
+
+    if (name == NULL)
+        name = "";
+
+    for (ptr = puserList; ptr != NULL; ptr = ptr->next) {
+      if (ptr->name && strlen(ptr->name) == nameLen
+	  && memcmp(ptr->name, name, nameLen) == 0) {
+          DEBUGMSGTL(("usm", "match on user %s\n", ptr->name));
+          if (ptr->engineIDLen == engineIDLen &&
+            ((ptr->engineID == NULL && engineID == NULL) ||
+             (ptr->engineID != NULL && engineID != NULL &&
+              memcmp(ptr->engineID, engineID, engineIDLen) == 0)))
+            return ptr;
+          DEBUGMSGTL(("usm", "no match on engineID ("));
+          if (engineID) {
+              DEBUGMSGHEX(("usm", engineID, engineIDLen));
+          } else {
+              DEBUGMSGTL(("usm", "Empty EngineID"));
+          }
+          DEBUGMSG(("usm", ")\n"));
+        }
+    }
+
+    /*
+     * return "" user used to facilitate engineID discovery
+     */
+    if (use_default && !strcmp(name, ""))
+        return noNameUser;
+    return NULL;
+}
+
+struct usmUser *
+usm_get_user2(const u_char *engineID, size_t engineIDLen, const void *name,
+	      size_t nameLen)
+{
+    DEBUGMSGTL(("usm", "getting user %.*s\n", (int)nameLen,
+                (const char *)name));
+    struct usmUser *puserList = *usm_user_list(engineID, engineIDLen);
+    return usm_get_user_from_list(engineID, engineIDLen, name, nameLen,
+				  puserList, 1);
+}
+
+struct usmUser *
+usm_get_user(const u_char *engineID, size_t engineIDLen, const char *name)
+{
+    return usm_get_user2(engineID, engineIDLen, name, strlen(name));
+}
+
+struct usmUser *
+usm_add_user(struct usmUser *user)
+{
+    struct usmUser *nptr, *pptr, *optr;
+    struct usmUser **ppuserList = usm_user_list(user->engineID, user->engineIDLen);
+
+    /*
+     * loop through puserList till we find the proper, sorted place to
+     * insert the new user
+     */
+    /* XXX - how to handle a NULL user->name ?? */
+    /* XXX - similarly for a NULL nptr->name ?? */
+    for (nptr = *ppuserList, pptr = NULL; nptr != NULL;
+         pptr = nptr, nptr = nptr->next) {
+        if (nptr->engineIDLen > user->engineIDLen)
+            break;
+
+        if (user->engineID == NULL && nptr->engineID != NULL)
+            break;
+
+        if (nptr->engineIDLen == user->engineIDLen &&
+            (nptr->engineID != NULL && user->engineID != NULL &&
+             memcmp(nptr->engineID, user->engineID,
+                    user->engineIDLen) > 0))
+            break;
+
+        if (!(nptr->engineID == NULL && user->engineID != NULL)) {
+            if (nptr->engineIDLen == user->engineIDLen &&
+                ((nptr->engineID == NULL && user->engineID == NULL) ||
+                 memcmp(nptr->engineID, user->engineID,
+                        user->engineIDLen) == 0)
+                && strlen(nptr->name) > strlen(user->name))
+                break;
+
+            if (nptr->engineIDLen == user->engineIDLen &&
+                ((nptr->engineID == NULL && user->engineID == NULL) ||
+                 memcmp(nptr->engineID, user->engineID,
+                        user->engineIDLen) == 0)
+                && strlen(nptr->name) == strlen(user->name)
+                && strcmp(nptr->name, user->name) > 0)
+                break;
+
+            if (nptr->engineIDLen == user->engineIDLen &&
+                ((nptr->engineID == NULL && user->engineID == NULL) ||
+                 memcmp(nptr->engineID, user->engineID,
+                        user->engineIDLen) == 0)
+                && strlen(nptr->name) == strlen(user->name)
+                && strcmp(nptr->name, user->name) == 0) {
+                /*
+                 * the user is an exact match of a previous entry.
+                 * Credentials may be different, though, so remove
+                 * the old entry (and add the new one)!
+                 */
+                if (pptr) { /* change prev's next pointer */
+                  pptr->next = nptr->next;
+                }
+		else {
+		  *ppuserList = nptr->next;
+		}
+                if (nptr->next) { /* change next's prev pointer */
+                  nptr->next->prev = pptr;
+                }
+                optr = nptr;
+                nptr = optr->next; /* add new user at this position */
+                /* free the old user */
+                optr->next=NULL;
+                optr->prev=NULL;
+                usm_free_user(optr);
+                break; /* new user will be added below */
+            }
+        }
+    }
+
+    /*
+     * nptr should now point to the user that we need to add ourselves
+     * in front of, and pptr should be our new 'prev'.
+     */
+
+    /*
+     * change our pointers
+     */
+    user->prev = pptr;
+    user->next = nptr;
+
+    /*
+     * change the next's prev pointer
+     */
+    if (user->next)
+        user->next->prev = user;
+
+    /*
+     * change the prev's next pointer
+     */
+    if (user->prev)
+        user->prev->next = user;
+    else
+      *ppuserList = user;
+
+    return user;
+}
+
+struct usmUser *
+usm_remove_user(struct usmUser *user)
+{
+    struct usmUser *nptr, *pptr;
+    struct usmUser **ppuserList = usm_user_list(user->engineID, user->engineIDLen);
+    /*
+     * find the user in the list
+     */
+    for (nptr = *ppuserList, pptr = NULL; nptr != NULL;
+         pptr = nptr, nptr = nptr->next) {
+        if (nptr == user)
+            break;
+    }
+
+    if (nptr) {
+        /*
+         * remove the user from the linked list
+         */
+        if (pptr) {
+            pptr->next = nptr->next;
+        }
+	else {
+	  *ppuserList = nptr->next;
+	}
+        if (nptr->next) {
+            nptr->next->prev = pptr;
+        }
+    }
+    return user;
+}
+
+#else // NHM_EXTENSION
+
 static struct usmUser *
 usm_get_user_from_list(const u_char *engineID, size_t engineIDLen,
                        const char *name, size_t nameLen,
@@ -728,6 +956,8 @@ usm_remove_user(struct usmUser *user)
 {
     return usm_remove_user_from_list(user, &userList);
 }
+
+#endif /* NHM_EXTENSION */
 
 /*
  * usm_free_user():  calls free() on all needed parts of struct usmUser and
@@ -3763,7 +3993,11 @@ usm_create_user_from_session_hook(struct session_list *slp,
     return usm_create_user_from_session(session);
 }
 
+#ifdef NHM_EXTENSION
+int
+#else
 static int
+#endif
 usm_build_probe_pdu(netsnmp_pdu **pdu)
 {
     struct usmUser *user;

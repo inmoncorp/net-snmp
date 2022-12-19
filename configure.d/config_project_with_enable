@@ -435,6 +435,12 @@ if test "x$enable_blumenthal_aes" = "xyes"; then
     fi
 fi
 
+NETSNMP_ARG_ENABLE(nhm-extensions,
+[  --enable-nhm-extensions         Enable nhm extension])
+if test "x$enable_nhm_extensions" = "xyes"; then
+    AC_DEFINE([NHM_EXTENSION], 1,
+      [Define for nhm extensions])
+fi
 
 ##
 #   Project: Library: Misc configuration
